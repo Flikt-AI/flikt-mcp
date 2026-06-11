@@ -124,27 +124,41 @@ class TestAudienceBinding:
         assert at is None
 
 
+class _FakeUnreadyClient:
+    async def get_project(self, project_id):
+        return {"id": project_id, "submission_status": "processing", "submission_id": "s1"}
+
+    async def aclose(self):
+        pass
+
+
 class TestRunScopeGate:
     @pytest.mark.asyncio
-    async def test_run_review_blocked_without_scope(self, monkeypatch):
+    async def test_run_review_blocked_without_scope_when_gating_on(self, monkeypatch):
         from flikt_mcp import server
 
+        monkeypatch.setattr(server, "_RUN_SCOPE_GATING", True)
         monkeypatch.setattr(server, "_request_has_scope", lambda scope: False)
         out = await server.run_review("p1")
         assert "isn't authorized to start reviews" in out
 
     @pytest.mark.asyncio
-    async def test_run_review_allowed_with_scope(self, monkeypatch):
+    async def test_run_review_allowed_with_scope_when_gating_on(self, monkeypatch):
         from flikt_mcp import server
 
-        class FakeClient:
-            async def get_project(self, project_id):
-                return {"id": project_id, "submission_status": "processing", "submission_id": "s1"}
-
-            async def aclose(self):
-                pass
-
+        monkeypatch.setattr(server, "_RUN_SCOPE_GATING", True)
         monkeypatch.setattr(server, "_request_has_scope", lambda scope: True)
-        monkeypatch.setattr(server, "_get_client", lambda: FakeClient())
+        monkeypatch.setattr(server, "_get_client", lambda: _FakeUnreadyClient())
         out = await server.run_review("p1")
         assert "not ready to run" in out  # scope passed; refused only for readiness
+
+    @pytest.mark.asyncio
+    async def test_run_review_default_open_when_gating_off(self, monkeypatch):
+        """Default (gating off): no custom scope required — backend 402 governs."""
+        from flikt_mcp import server
+
+        monkeypatch.setattr(server, "_RUN_SCOPE_GATING", False)
+        monkeypatch.setattr(server, "_request_has_scope", lambda scope: False)
+        monkeypatch.setattr(server, "_get_client", lambda: _FakeUnreadyClient())
+        out = await server.run_review("p1")
+        assert "not ready to run" in out  # proceeded despite missing scope

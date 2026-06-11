@@ -239,7 +239,7 @@ async def run_review(project_id: str, submission_id: Optional[str] = None) -> st
     would require payment is refused with instructions. If submission_id is
     omitted, the project's latest submission is used when it is ready to run.
     Reviews take a while: poll check_review_status afterwards."""
-    if not _request_has_scope(_RUN_SCOPE):
+    if _RUN_SCOPE_GATING and not _request_has_scope(_RUN_SCOPE):
         return (
             "This connection isn't authorized to start reviews. Reconnect the Flikt "
             "connector and grant the 'start reviews' permission, or start the review "
@@ -263,6 +263,12 @@ async def run_review(project_id: str, submission_id: Optional[str] = None) -> st
 # Resolved lazily so local mode never imports the auth module (and its
 # pyjwt/cryptography deps).
 _RUN_SCOPE = "reviews:run"
+# MCP-layer run-scope gating is OFF by default: Clerk issues only standard OIDC
+# scopes (profile/email/offline_access), so there is no custom run scope to
+# check, and the backend's 402 spend-guard is the real control on starting
+# reviews. Set FLIKT_MCP_GATE_RUN_SCOPE=1 to enforce a custom run scope if one
+# is ever configured on the Clerk OAuth app.
+_RUN_SCOPE_GATING = os.environ.get("FLIKT_MCP_GATE_RUN_SCOPE", "").lower() in ("1", "true", "yes")
 if _REMOTE:
     from flikt_mcp.auth import SCOPE_RUN as _RUN_SCOPE  # noqa: E402
 
