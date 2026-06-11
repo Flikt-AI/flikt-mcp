@@ -1,6 +1,6 @@
 [project]
 name = "flikt-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for Flikt.AI — browse plan-review results, ask questions, export RFIs, and start reviews from Claude"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,8 +29,11 @@ Repository = "https://github.com/Flikt-AI/flikt-mcp"
 [project.scripts]
 flikt-mcp = "flikt_mcp.server:main"
 
+# Hosted (mcp.flikt.ai) mode: validates Clerk OAuth JWTs. Local stdio mode
+# (FLIKT_API_TOKEN) needs none of this — flikt_mcp.auth is imported lazily.
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4"]
+remote = ["pyjwt[crypto]>=2.8"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "pyjwt[crypto]>=2.8"]
 
 [build-system]
 requires = ["hatchling"]
