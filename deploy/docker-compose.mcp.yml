@@ -1,0 +1,47 @@
+# Isolated deploy for the hosted Flikt MCP connector (mcp.flikt.ai).
+#
+# Two containers on their own network — touches NOTHING in the main
+# flikt-ai-backend stack (portal/api/nginx are untouched):
+#   * mcp         — the Streamable-HTTP MCP server (remote mode), reachable only
+#                   on this compose network as http://mcp:8080 (no host port).
+#   * cloudflared — a Cloudflare-dashboard-managed named tunnel that routes
+#                   https://mcp.flikt.ai -> http://mcp:8080, with TLS handled at
+#                   Cloudflare's edge. No nginx/certbot/security-group changes.
+#
+# Setup:
+#   1. In Cloudflare Zero Trust -> Networks -> Tunnels -> Create a tunnel
+#      (named e.g. "flikt-mcp"). Copy the tunnel TOKEN.
+#   2. Add a Public Hostname to that tunnel:
+#        Subdomain: mcp   Domain: flikt.ai   ->   Service: HTTP  http://mcp:8080
+#      (Cloudflare auto-creates the mcp.flikt.ai DNS record.)
+#   3. On the host, create deploy/.env next to this file with:
+#        CLOUDFLARED_TUNNEL_TOKEN=<paste token>
+#   4. docker compose -f deploy/docker-compose.mcp.yml up -d --build
+#
+# Update: git pull && docker compose -f deploy/docker-compose.mcp.yml up -d --build
+
+services:
+  mcp:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      FLIKT_MCP_REMOTE: "1"
+      CLERK_ISSUER: "https://clerk.flikt.ai"
+      FLIKT_API_BASE: "https://api.flikt.ai"
+      MCP_RESOURCE_URL: "https://mcp.flikt.ai"
+      FLIKT_MCP_HOST: "0.0.0.0"
+      FLIKT_MCP_PORT: "8080"
+      # Belt-and-suspenders: allow the public host (already derived from
+      # MCP_RESOURCE_URL) plus the internal service name cloudflared dials.
+      FLIKT_MCP_ALLOWED_HOSTS: "mcp.flikt.ai mcp mcp:8080"
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARED_TUNNEL_TOKEN}"
+    restart: unless-stopped
+    depends_on:
+      - mcp
