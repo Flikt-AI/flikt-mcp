@@ -48,15 +48,35 @@ def _build_mcp() -> FastMCP:
     if not _REMOTE:
         return FastMCP("flikt", instructions=_INSTRUCTIONS)
 
+    from urllib.parse import urlparse
+
     from mcp.server.auth.settings import AuthSettings
+    from mcp.server.transport_security import TransportSecuritySettings
 
     from flikt_mcp.auth import ClerkTokenVerifier, clerk_issuer
 
     resource_url = os.environ.get("MCP_RESOURCE_URL", "https://mcp.flikt.ai").rstrip("/")
+    host = os.environ.get("FLIKT_MCP_HOST", "0.0.0.0")
+    port = int(os.environ.get("FLIKT_MCP_PORT", "8080"))
     # Empty by default to avoid locking out the first real connection before
     # Clerk's emitted scopes are confirmed (Phase 2). run_review is separately
     # gated on SCOPE_RUN below.
     required_scopes = os.environ.get("FLIKT_MCP_REQUIRED_SCOPES", "").split()
+    # DNS-rebinding protection trusts only the bind host by default, so it 421s
+    # ("Misdirected Request") any request whose Host header is our public domain
+    # (the tunnel or mcp.flikt.ai). Allow the public resource host explicitly —
+    # this keeps the protection on, just widens the allowlist to the real edge.
+    public_host = urlparse(resource_url).netloc
+    extra_hosts = os.environ.get("FLIKT_MCP_ALLOWED_HOSTS", "").replace(",", " ").split()
+    allowed_hosts = [
+        h
+        for h in [public_host, "127.0.0.1", "localhost", f"127.0.0.1:{port}", f"localhost:{port}", *extra_hosts]
+        if h
+    ]
+    transport_security = TransportSecuritySettings(
+        allowed_hosts=allowed_hosts,
+        allowed_origins=[resource_url, f"http://127.0.0.1:{port}", f"http://localhost:{port}"],
+    )
     return FastMCP(
         "flikt",
         instructions=_INSTRUCTIONS,
@@ -66,8 +86,9 @@ def _build_mcp() -> FastMCP:
             resource_server_url=resource_url,
             required_scopes=required_scopes,
         ),
-        host=os.environ.get("FLIKT_MCP_HOST", "0.0.0.0"),
-        port=int(os.environ.get("FLIKT_MCP_PORT", "8080")),
+        transport_security=transport_security,
+        host=host,
+        port=port,
     )
 
 
