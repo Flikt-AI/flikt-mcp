@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import Icon, ToolAnnotations
 
 from flikt_mcp.client import FliktApiError, FliktClient
 
@@ -38,6 +39,18 @@ _INSTRUCTIONS = (
     "every few minutes rather than waiting synchronously."
 )
 
+# Brand surfaced to Claude (connector UI + directory listing). This is the same
+# square mark flikt.ai serves, so the connector is visually identifiable as
+# Flikt everywhere it appears. Advertised in both run modes.
+_WEBSITE_URL = "https://flikt.ai"
+_ICONS = [
+    Icon(
+        src="https://flikt.ai/wp-content/uploads/2026/06/wp-site-icon-512.png",
+        mimeType="image/png",
+        sizes=["512x512"],
+    )
+]
+
 _REMOTE = os.environ.get("FLIKT_MCP_REMOTE", "").lower() in ("1", "true", "yes")
 
 
@@ -46,7 +59,12 @@ def _build_mcp() -> FastMCP:
     wired to validate Clerk OAuth tokens and serve RFC 9728 protected-resource
     metadata."""
     if not _REMOTE:
-        return FastMCP("flikt", instructions=_INSTRUCTIONS)
+        return FastMCP(
+            "flikt",
+            instructions=_INSTRUCTIONS,
+            website_url=_WEBSITE_URL,
+            icons=_ICONS,
+        )
 
     from urllib.parse import urlparse
 
@@ -70,7 +88,14 @@ def _build_mcp() -> FastMCP:
     extra_hosts = os.environ.get("FLIKT_MCP_ALLOWED_HOSTS", "").replace(",", " ").split()
     allowed_hosts = [
         h
-        for h in [public_host, "127.0.0.1", "localhost", f"127.0.0.1:{port}", f"localhost:{port}", *extra_hosts]
+        for h in [
+            public_host,
+            "127.0.0.1",
+            "localhost",
+            f"127.0.0.1:{port}",
+            f"localhost:{port}",
+            *extra_hosts,
+        ]
         if h
     ]
     transport_security = TransportSecuritySettings(
@@ -80,6 +105,8 @@ def _build_mcp() -> FastMCP:
     return FastMCP(
         "flikt",
         instructions=_INSTRUCTIONS,
+        website_url=_WEBSITE_URL,
+        icons=_ICONS,
         token_verifier=ClerkTokenVerifier(),
         auth=AuthSettings(
             issuer_url=clerk_issuer(),
@@ -162,7 +189,13 @@ def _condense_project(p: dict) -> dict:
     return {k: p[k] for k in keys if k in p}
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List Flikt projects",
+        readOnlyHint=True,
+        openWorldHint=True,
+    )
+)
 async def list_projects() -> str:
     """List the Flikt projects this token can access, with open-conflict
     counts by severity and the latest review status per project."""
@@ -171,7 +204,13 @@ async def list_projects() -> str:
     return json.dumps([_condense_project(p) for p in projects], indent=2)
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get project summary",
+        readOnlyHint=True,
+        openWorldHint=True,
+    )
+)
 async def get_project(project_id: str) -> str:
     """Get one project's summary: review status, page counts, open-conflict
     severity rollup, and the latest submission id (needed for run_review)."""
@@ -179,7 +218,13 @@ async def get_project(project_id: str) -> str:
         return json.dumps(_condense_project(await client.get_project(project_id)), indent=2)
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List coordination conflicts",
+        readOnlyHint=True,
+        openWorldHint=True,
+    )
+)
 async def list_conflicts(
     project_id: str,
     severity: Optional[str] = None,
@@ -210,7 +255,13 @@ async def list_conflicts(
     return json.dumps(data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Ask about a project's results",
+        readOnlyHint=True,
+        openWorldHint=True,
+    )
+)
 async def ask_project(project_id: str, question: str) -> str:
     """Ask a question about a project's review results — total cost exposure,
     counts by severity/discipline, top risks, schedule impact. Answers come
@@ -219,7 +270,13 @@ async def ask_project(project_id: str, question: str) -> str:
         return json.dumps(await client.ask(project_id, question), indent=2)
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Check review status",
+        readOnlyHint=True,
+        openWorldHint=True,
+    )
+)
 async def check_review_status(project_id: str) -> str:
     """Check whether a project's review is finished. Returns the latest
     submission status: 'uploaded' (validated, ready to run), 'processing'
@@ -240,19 +297,48 @@ async def check_review_status(project_id: str) -> str:
     )
 
 
-@mcp.tool()
-async def save_rfis_pdf(project_id: str, save_path: str) -> str:
-    """Download the project's RFI package (one ready-to-send RFI per open
-    conflict) as a PDF to a local file path."""
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Export RFI package (PDF)",
+        readOnlyHint=False,
+        destructiveHint=False,
+        openWorldHint=True,
+    )
+)
+async def save_rfis_pdf(project_id: str, save_path: Optional[str] = None) -> str:
+    """Export the project's RFI package — one ready-to-send RFI per open
+    conflict — as a PDF.
+
+    On a local desktop install this saves the PDF to ``save_path`` on your
+    machine. Over the hosted Flikt connector, tools can't write to your
+    computer, so this confirms the package is ready and points you to the Flikt
+    portal to download it."""
     async with _client_for_request() as client:
         pdf = await client.download_bulk_rfis_pdf(project_id)
+    if _REMOTE:
+        return (
+            f"Your RFI package is ready ({len(pdf):,} bytes). The hosted Flikt "
+            "connector can't save files to your computer — open this project in "
+            "the Flikt portal and use Export RFIs to download the PDF. You can "
+            "keep asking me about the project's conflicts here in the meantime."
+        )
+    if not save_path:
+        return "To save the RFI package, call this again with a save_path, e.g. ~/Downloads/flikt-rfis.pdf"
     path = Path(save_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pdf)
-    return f"Saved RFI package ({len(pdf)} bytes) to {path}"
+    return f"Saved RFI package ({len(pdf):,} bytes) to {path}"
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Start a plan review",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
 async def run_review(project_id: str, submission_id: Optional[str] = None) -> str:
     """Start the review for a project's uploaded plan set. Requires a token
     with the 'start reviews' permission and an uploaded (validated)

@@ -174,6 +174,31 @@ class TestServerTools:
             "run_review",
         }
 
+    def test_all_tools_have_directory_annotations(self):
+        """Connectors-directory hard gate: every tool must carry a title and
+        either readOnlyHint or destructiveHint (missing annotations are the #1
+        rejection reason). Lock it so a new tool can't ship un-annotated."""
+        from flikt_mcp import server
+
+        for t in server.mcp._tool_manager.list_tools():
+            ann = t.annotations
+            assert ann is not None, f"{t.name}: missing annotations"
+            assert ann.title, f"{t.name}: missing annotations.title"
+            assert (ann.readOnlyHint is not None) or (ann.destructiveHint is not None), (
+                f"{t.name}: needs readOnlyHint or destructiveHint"
+            )
+
+    def test_read_tools_are_read_only(self):
+        """The five browse/ask tools must declare readOnlyHint=True; the two
+        write/action tools (export, run) must not."""
+        from flikt_mcp import server
+
+        ro = {t.name: t.annotations.readOnlyHint for t in server.mcp._tool_manager.list_tools()}
+        for name in ("list_projects", "get_project", "list_conflicts", "ask_project", "check_review_status"):
+            assert ro[name] is True, f"{name} should be readOnlyHint=True"
+        for name in ("save_rfis_pdf", "run_review"):
+            assert ro[name] is False, f"{name} should not be readOnlyHint=True"
+
     @pytest.mark.asyncio
     async def test_list_conflicts_truncates(self, monkeypatch):
         from flikt_mcp import server
