@@ -17,5 +17,11 @@ ENV FLIKT_MCP_REMOTE=1 \
     FLIKT_MCP_HOST=0.0.0.0 \
     FLIKT_MCP_PORT=8080
 
+# Drop root: run as an unprivileged user (8080 is non-privileged, so no
+# cap_net_bind needed). The package is installed system-wide above and is
+# world-readable, so the runtime user needs no extra grants.
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
+
 EXPOSE 8080
 CMD ["python", "-m", "flikt_mcp"]

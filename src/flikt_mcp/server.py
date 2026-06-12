@@ -21,6 +21,7 @@ strings (FliktApiError messages are customer-facing by doctrine).
 from __future__ import annotations
 
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,6 +31,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import Icon, ToolAnnotations
 
 from flikt_mcp.client import FliktApiError, FliktClient
+
+logger = logging.getLogger("flikt_mcp.server")
 
 _INSTRUCTIONS = (
     "Tools for Flikt.AI construction plan reviews: browse projects, read "
@@ -71,7 +74,14 @@ def _build_mcp() -> FastMCP:
     from mcp.server.auth.settings import AuthSettings
     from mcp.server.transport_security import TransportSecuritySettings
 
-    from flikt_mcp.auth import ClerkTokenVerifier, clerk_issuer
+    from flikt_mcp.auth import ClerkTokenVerifier, _audience_enforced, clerk_issuer
+
+    if not _audience_enforced():
+        logger.warning(
+            "Audience binding is DISABLED (FLIKT_MCP_VERIFY_AUDIENCE off): any valid Clerk "
+            "token for this instance is accepted (each still resolves to its own user via the "
+            "backend's tenant scoping). Enable it once Clerk's OAuth 'aud' value is confirmed."
+        )
 
     resource_url = os.environ.get("MCP_RESOURCE_URL", "https://mcp.flikt.ai").rstrip("/")
     host = os.environ.get("FLIKT_MCP_HOST", "0.0.0.0")
@@ -266,6 +276,8 @@ async def ask_project(project_id: str, question: str) -> str:
     """Ask a question about a project's review results — total cost exposure,
     counts by severity/discipline, top risks, schedule impact. Answers come
     straight from the project's conflict data."""
+    if len(question) > 2000:
+        return "Question is too long (max 2000 characters) — please shorten it."
     async with _client_for_request() as client:
         return json.dumps(await client.ask(project_id, question), indent=2)
 
@@ -324,7 +336,13 @@ async def save_rfis_pdf(project_id: str, save_path: Optional[str] = None) -> str
         )
     if not save_path:
         return "To save the RFI package, call this again with a save_path, e.g. ~/Downloads/flikt-rfis.pdf"
-    path = Path(save_path).expanduser()
+    # Contain the write to the user's home tree — a save_path coming from model
+    # output (possibly influenced by returned conflict text) must not escape to
+    # arbitrary filesystem locations.
+    path = Path(save_path).expanduser().resolve()
+    home = Path.home().resolve()
+    if path != home and home not in path.parents:
+        return f"Refusing to write outside your home directory ({home}). Pick a save_path under it."
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(pdf)
     return f"Saved RFI package ({len(pdf):,} bytes) to {path}"

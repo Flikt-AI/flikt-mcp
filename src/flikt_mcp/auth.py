@@ -49,7 +49,18 @@ def clerk_issuer() -> str:
 
 
 def _jwks_url() -> str:
-    return os.environ.get("CLERK_JWKS_URL") or f"{clerk_issuer()}/.well-known/jwks.json"
+    override = os.environ.get("CLERK_JWKS_URL")
+    if not override:
+        return f"{clerk_issuer()}/.well-known/jwks.json"
+    # A JWKS endpoint on a different origin than the issuer would let an injected
+    # env var substitute attacker-controlled signing keys (full JWT-validation
+    # bypass). Only honor an override on the issuer's own origin.
+    from urllib.parse import urlparse
+
+    iss, ov = urlparse(clerk_issuer()), urlparse(override)
+    if (ov.scheme, ov.netloc) != (iss.scheme, iss.netloc):
+        raise RuntimeError("CLERK_JWKS_URL origin must match CLERK_ISSUER origin.")
+    return override
 
 
 def _audience_enforced() -> bool:
@@ -68,7 +79,10 @@ _jwk_client: PyJWKClient | None = None
 def _get_jwk_client() -> PyJWKClient:
     global _jwk_client
     if _jwk_client is None:
-        _jwk_client = PyJWKClient(_jwks_url())
+        # timeout: a hung Clerk JWKS endpoint must not stall every token
+        # verification. lifespan: bound how long a rotated-out signing key may
+        # stay cached (else a revoked key lingers for the whole task lifetime).
+        _jwk_client = PyJWKClient(_jwks_url(), cache_keys=True, lifespan=3600, timeout=10)
     return _jwk_client
 
 
@@ -111,10 +125,11 @@ class ClerkTokenVerifier(TokenVerifier):
         try:
             claims = await anyio.to_thread.run_sync(_verify_sync, token)
         except InvalidTokenError as e:
-            logger.info("Rejected MCP token: %s", e)
+            # Log the failure class only — never the token or message fragments.
+            logger.info("Rejected MCP token: %s", type(e).__name__)
             return None
         except Exception as e:  # JWKS fetch / key errors — fail closed
-            logger.warning("MCP token verification error: %s", e)
+            logger.warning("MCP token verification error: %s", type(e).__name__)
             return None
 
         subject = claims.get("sub")

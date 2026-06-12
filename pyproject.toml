@@ -18,8 +18,8 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "mcp>=1.0.0",
-    "httpx>=0.27",
+    "mcp>=1.0.0,<2",
+    "httpx>=0.27,<1",
 ]
 
 [project.urls]
@@ -32,8 +32,8 @@ flikt-mcp = "flikt_mcp.server:main"
 # Hosted (mcp.flikt.ai) mode: validates Clerk OAuth JWTs. Local stdio mode
 # (FLIKT_API_TOKEN) needs none of this — flikt_mcp.auth is imported lazily.
 [project.optional-dependencies]
-remote = ["pyjwt[crypto]>=2.8"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "pyjwt[crypto]>=2.8"]
+remote = ["pyjwt[crypto]>=2.8,<3"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "pyjwt[crypto]>=2.8,<3"]
 
 [build-system]
 requires = ["hatchling"]
