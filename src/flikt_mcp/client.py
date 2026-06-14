@@ -69,7 +69,10 @@ class FliktClient:
         try:
             resp = await self._client.request(method, path, **kwargs)
         except httpx.HTTPError as e:
-            raise FliktApiError(0, f"Could not reach the Flikt API at {self._base_url}: {e}") from e
+            # Don't echo the base URL (it can be an internal host) or raw error.
+            raise FliktApiError(
+                0, f"Could not reach the Flikt API ({type(e).__name__}). Check your connection and retry."
+            ) from e
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", resp.text)

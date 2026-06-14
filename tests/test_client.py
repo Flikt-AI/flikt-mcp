@@ -133,13 +133,20 @@ class TestErrorMapping:
             await c.get_project("nope")
 
     @pytest.mark.asyncio
-    async def test_network_error_names_host(self):
+    async def test_network_error_does_not_leak_host(self):
+        """Unreachable-API errors must name the failure class, not the base URL
+        (which can be an internal host) — SEC-07."""
+
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("boom")
 
         c = _client_with(handler)
-        with pytest.raises(FliktApiError, match="api.test"):
+        with pytest.raises(FliktApiError) as exc:
             await c.list_projects()
+        msg = str(exc.value)
+        assert "ConnectError" in msg
+        assert "api.test" not in msg  # base URL not leaked
+        assert "boom" not in msg  # raw exception text not leaked
 
     @pytest.mark.asyncio
     async def test_non_json_error_body_tolerated(self):
@@ -174,6 +181,31 @@ class TestServerTools:
             "run_review",
         }
 
+    def test_all_tools_have_directory_annotations(self):
+        """Connectors-directory hard gate: every tool must carry a title and
+        either readOnlyHint or destructiveHint (missing annotations are the #1
+        rejection reason). Lock it so a new tool can't ship un-annotated."""
+        from flikt_mcp import server
+
+        for t in server.mcp._tool_manager.list_tools():
+            ann = t.annotations
+            assert ann is not None, f"{t.name}: missing annotations"
+            assert ann.title, f"{t.name}: missing annotations.title"
+            assert (ann.readOnlyHint is not None) or (ann.destructiveHint is not None), (
+                f"{t.name}: needs readOnlyHint or destructiveHint"
+            )
+
+    def test_read_tools_are_read_only(self):
+        """The five browse/ask tools must declare readOnlyHint=True; the two
+        write/action tools (export, run) must not."""
+        from flikt_mcp import server
+
+        ro = {t.name: t.annotations.readOnlyHint for t in server.mcp._tool_manager.list_tools()}
+        for name in ("list_projects", "get_project", "list_conflicts", "ask_project", "check_review_status"):
+            assert ro[name] is True, f"{name} should be readOnlyHint=True"
+        for name in ("save_rfis_pdf", "run_review"):
+            assert ro[name] is False, f"{name} should not be readOnlyHint=True"
+
     @pytest.mark.asyncio
     async def test_list_conflicts_truncates(self, monkeypatch):
         from flikt_mcp import server
@@ -186,6 +218,27 @@ class TestServerTools:
         out = json.loads(await server.list_conflicts("p1", max_results=25))
         assert len(out["conflicts"]) == 25
         assert "Showing 25 of 40" in out["note"]
+
+    @pytest.mark.asyncio
+    async def test_ask_project_rejects_overlong_question(self):
+        """Cap forwarded question length (DoS / prompt-injection forward)."""
+        from flikt_mcp import server
+
+        out = await server.ask_project("p1", "x" * 2001)
+        assert "too long" in out.lower()
+
+    @pytest.mark.asyncio
+    async def test_save_rfis_pdf_refuses_path_escape(self, monkeypatch):
+        """Local-mode write must not escape the user's home tree."""
+        from flikt_mcp import server
+
+        class FakeClient:
+            async def download_bulk_rfis_pdf(self, project_id):
+                return b"%PDF-1.4 fake"
+
+        monkeypatch.setattr(server, "_get_client", lambda: FakeClient())
+        out = await server.save_rfis_pdf("p1", "/etc/cron.d/evil")
+        assert "Refusing to write outside" in out
 
     @pytest.mark.asyncio
     async def test_run_review_refuses_unready_submission(self, monkeypatch):
