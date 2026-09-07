@@ -33,7 +33,15 @@ flikt-mcp = "flikt_mcp.server:main"
 # (FLIKT_API_TOKEN) needs none of this — flikt_mcp.auth is imported lazily.
 [project.optional-dependencies]
 remote = ["pyjwt[crypto]>=2.8,<3"]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4", "pyjwt[crypto]>=2.8,<3"]
+# ruff is PINNED EXACTLY, not floored. CI runs `ruff check .` against whatever
+# `pip install -e ".[dev]"` resolves, so under the old `ruff>=0.4` the linter
+# silently upgraded between runs and its DEFAULT RULE SET moved with it: the
+# last green run on main was 2026-06-14, and the identical tree fails today
+# with 20 findings (12 UP045, 6 RUF100, 2 BLE001) on lines nobody has touched
+# since. A build that turns red with no code change is not a signal, and it
+# lands on whichever PR happens to be open next. A linter is a tool, not a
+# dependency — pin it and upgrade it deliberately.
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff==0.15.15", "pyjwt[crypto]>=2.8,<3"]
 
 [build-system]
 requires = ["hatchling"]
