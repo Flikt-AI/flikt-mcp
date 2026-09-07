@@ -90,6 +90,70 @@ class TestVerify:
         assert await auth.ClerkTokenVerifier().verify_token(_mint(priv, exp=int(time.time()) - 10)) is None
 
     @pytest.mark.asyncio
+    async def test_missing_iat_rejected(self, keypair):
+        """SEC-04: a token with no issue time is refused, not silently accepted."""
+        priv, _ = keypair
+        assert await auth.ClerkTokenVerifier().verify_token(_mint(priv, iat=_OMIT)) is None
+
+    @pytest.mark.asyncio
+    async def test_missing_exp_rejected(self, keypair):
+        """Negative control for the require list: `iat` alone is not enough.
+
+        Without this, a `require` list that lost `exp` would still pass every
+        other test in the class, because `_mint` always stamps both claims.
+        """
+        priv, _ = keypair
+        assert await auth.ClerkTokenVerifier().verify_token(_mint(priv, exp=_OMIT)) is None
+
+    @pytest.mark.asyncio
+    async def test_forward_clock_skew_tolerated(self, keypair):
+        """A token minted on a clock AHEAD of ours still verifies.
+
+        Measured on PyJWT 2.13.0: by default an `iat` five seconds in the
+        future is rejected (ImmatureSignatureError). Clerk mints on its clock
+        and we validate on ours, so a mildly fast issuer would 401 every
+        request the moment `iat` became mandatory. Pins the `verify_iat: False`
+        that makes requiring the claim safe.
+        """
+        priv, _ = keypair
+        now = int(time.time())
+        for skew in (5, 60, 3600):
+            at = await auth.ClerkTokenVerifier().verify_token(_mint(priv, iat=now + skew))
+            assert at is not None, f"iat skewed +{skew}s should be tolerated"
+
+    @pytest.mark.asyncio
+    async def test_expiry_still_strict_despite_iat_relaxation(self, keypair):
+        """NEGATIVE CONTROL for the fix above.
+
+        The rejected alternative was a global `leeway`, which would also have
+        granted expired tokens a grace window. Relaxing `iat` must not buy an
+        expired token even one second, so this pins expiry at the boundary a
+        60s leeway would have swallowed.
+        """
+        priv, _ = keypair
+        now = int(time.time())
+        for expired_by in (1, 10, 59):
+            tok = _mint(priv, exp=now - expired_by, iat=now - expired_by - 1)
+            assert await auth.ClerkTokenVerifier().verify_token(tok) is None, (
+                f"a token expired {expired_by}s ago must still be refused"
+            )
+
+    @pytest.mark.asyncio
+    async def test_iat_requirement_can_be_disabled(self, keypair, monkeypatch):
+        """The kill switch really relaxes the requirement — a lockout is
+        recoverable by env change, not only by redeploy."""
+        priv, _ = keypair
+        monkeypatch.setenv("FLIKT_MCP_REQUIRE_IAT", "false")
+        assert await auth.ClerkTokenVerifier().verify_token(_mint(priv, iat=_OMIT)) is not None
+
+    @pytest.mark.asyncio
+    async def test_iat_required_by_default(self, keypair, monkeypatch):
+        """...and it is ON unless explicitly turned off."""
+        priv, _ = keypair
+        monkeypatch.delenv("FLIKT_MCP_REQUIRE_IAT", raising=False)
+        assert await auth.ClerkTokenVerifier().verify_token(_mint(priv, iat=_OMIT)) is None
+
+    @pytest.mark.asyncio
     async def test_missing_sub_rejected(self, keypair):
         priv, _ = keypair
         assert await auth.ClerkTokenVerifier().verify_token(_mint(priv, sub=_OMIT)) is None

@@ -36,12 +36,104 @@ services:
       # MCP_RESOURCE_URL) plus the internal service name cloudflared dials.
       FLIKT_MCP_ALLOWED_HOSTS: "mcp.flikt.ai mcp mcp:8080"
     restart: unless-stopped
+    # INFRA-04 (S236 cold review). `restart: unless-stopped` only notices a
+    # process that EXITS; an ASGI worker that is up but no longer answering
+    # keeps the container "running" and the tunnel keeps routing to it.
+    #
+    # ⚠️ THIS HEALTHCHECK IS OBSERVABILITY, NOT REMEDIATION. Docker does not
+    # restart a container for going unhealthy, and nothing here declares
+    # `depends_on: condition: service_healthy`, so cloudflared keeps routing
+    # to a hung mcp either way. What it buys is that `docker ps` and any
+    # host-level monitor can TELL the difference between "running" and
+    # "answering" — today they cannot. Auto-restart on unhealthy needs an
+    # external supervisor (e.g. autoheal) and is deliberately not added here.
+    #
+    # The check is deliberately HTTP rather than a bare TCP connect, because a
+    # TCP connect passes against exactly the hung-app case this exists to
+    # catch. Two things make it robust:
+    #   * Host: mcp — TransportSecuritySettings enforces the DNS-rebind
+    #     allowlist set two lines above, and `mcp` is in it. A localhost Host
+    #     header would be refused with 421.
+    #   * ANY HTTP status counts as healthy. The question here is "is the app
+    #     answering", not "is this request authorized" — an unauthenticated
+    #     probe legitimately draws a 401/404, and treating those as failures
+    #     would mark a perfectly healthy server down.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import http.client, sys
+          try:
+              c = http.client.HTTPConnection("127.0.0.1", 8080, timeout=5)
+              c.request("GET", "/mcp", headers={"Host": "mcp"})
+              c.getresponse().read(1)
+          except Exception:
+              sys.exit(1)
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    # INFRA-05 (PARTIAL — the memory leg is deliberately NOT closed here).
+    #
+    # A public internet-facing service with no ceiling can take the whole host
+    # down, and this host is not dedicated to the connector. CPU and pid
+    # ceilings are safe to set blind because they DEGRADE: exceeding them
+    # throttles, it does not kill.
+    #
+    # ⛔ NO `mem_limit`. It was written as 512m on the reasoning that this is a
+    # thin JWT-validating proxy that "holds no corpus in memory" — and that
+    # reasoning is false. `client.FliktClient._request` calls httpx without
+    # `stream=True` and returns `resp.content`, so `download_bulk_rfis_pdf` /
+    # `save_rfis_pdf` materialise an ENTIRE bulk RFI PDF as one bytes object;
+    # remote mode also builds a fresh client per request, so concurrent
+    # tenants stack whole payloads inside the same ceiling. A memory ceiling
+    # crossed there is an OOM-kill of the process, which drops EVERY tenant's
+    # in-flight request — strictly worse than the unbounded growth it replaces.
+    # Adding an unmeasured ceiling to a live public service converts a slow
+    # request into a total outage.
+    #
+    # What closes it: measure real worst-case bulk-RFI PDF sizes on the largest
+    # live projects and set the limit with headroom for realistic concurrency,
+    # or make that path stream instead of buffer. Tracked separately — see the
+    # PR body.
+    #
+    # Service-level `cpus`/`pids_limit` rather than `deploy.resources.limits`:
+    # both forms are honoured by Compose v2, but `pids_limit` has no
+    # `deploy.resources` equivalent at all, and splitting the pair across two
+    # spellings is how one of them quietly goes missing later.
+    cpus: 1.0
+    pids_limit: 256
+    # Unbounded json-file logging on a long-lived service fills the host disk;
+    # nothing else here caps it.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   cloudflared:
+    # ⚠️ STILL `:latest` — INFRA-01 is NOT closed by this PR. Pinning needs a
+    # tag verified against the registry, and this change was prepared without
+    # registry access. Pin to a real published tag (e.g. 2026.x.y) rather than
+    # guessing one: a tag that does not exist fails the tunnel closed and takes
+    # mcp.flikt.ai down, which is worse than the drift risk it would fix.
     image: cloudflare/cloudflared:latest
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN: "${CLOUDFLARED_TUNNEL_TOKEN}"
     restart: unless-stopped
+    # cloudflared proxies the tunnel stream rather than buffering whole bodies,
+    # so it does not carry the mcp service's buffered-PDF hazard; a memory
+    # ceiling here is safe to set.
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     depends_on:
       - mcp
