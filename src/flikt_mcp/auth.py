@@ -63,6 +63,21 @@ def _jwks_url() -> str:
     return override
 
 
+def _iat_required() -> bool:
+    """Whether a token with no ``iat`` is refused.
+
+    ON by default: `iat` is effectively universal on OAuth JWT access tokens
+    (RFC 9068 §2.2 lists it as required) and Clerk stamps it today. The switch
+    exists because this verifier fronts a LIVE public endpoint and the failure
+    mode is total — if some issuer configuration ever omits `iat`, every
+    request 401s at once. With the flag, recovery is
+    ``FLIKT_MCP_REQUIRE_IAT=false`` plus a restart; without it, recovery is a
+    code revert, rebuild and redeploy. Mirrors the FLIKT_MCP_VERIFY_AUDIENCE
+    escape hatch, defaulting the other way because the evidence is stronger.
+    """
+    return os.environ.get("FLIKT_MCP_REQUIRE_IAT", "true").lower() not in ("0", "false", "no")
+
+
 def _audience_enforced() -> bool:
     """Audience/resource binding is a go-live gate (Phase 4): enable once the
     Phase-0 spike observes the exact ``aud`` Clerk stamps on OAuth access
@@ -100,7 +115,48 @@ def _verify_sync(token: str) -> dict[str, Any]:
     loop via ``anyio.to_thread``."""
     issuer = clerk_issuer()
     signing_key = _get_jwk_client().get_signing_key_from_jwt(token)
-    options: dict[str, Any] = {"require": ["exp"]}
+    # SEC-04 (S236 cold review): require ``iat`` alongside ``exp``.
+    #
+    # ``exp`` alone bounds only the FAR end of a token's life. Without ``iat``
+    # there is no issue time to reason about, so a token minted with an
+    # over-long lifetime is indistinguishable from a fresh one, and nothing
+    # downstream — logs, incident forensics, a future max-age check — can say
+    # how old a presented credential is. PyJWT validates ``iat`` when present;
+    # ``require`` is what makes its ABSENCE a rejection rather than a silent
+    # pass. Clerk stamps ``iat`` on every access token it issues, so this
+    # rejects nothing Clerk mints today; it closes the door on a token that
+    # omits it. See ``_iat_required`` for the escape hatch if that ever stops
+    # being true.
+    #
+    # WHERE A NEW REQUIRED CLAIM GOES. ``require`` is for claims whose absence
+    # must fail the DECODE — the registered temporal/identity claims PyJWT
+    # itself understands (exp, iat, nbf, aud, iss). ``sub`` is deliberately NOT
+    # here: it is checked after the decode in ``ClerkTokenVerifier`` because a
+    # missing subject is an authorization outcome we want to log as its own
+    # case, not an InvalidTokenError indistinguishable from a bad signature.
+    # Registered claim -> this list. Application claim -> the verifier.
+    required = ["exp", "iat"] if _iat_required() else ["exp"]
+    # PRESENCE is required; the FUTURE-DATING check on `iat` is not.
+    #
+    # MEASURED on the pinned PyJWT 2.13.0, not assumed: with PyJWT's default
+    # settings an `iat` only FIVE SECONDS in the future is rejected outright —
+    #     iat = now +   0s -> ACCEPTED
+    #     iat = now +   5s -> REJECTED ImmatureSignatureError
+    #     iat = now + 120s -> REJECTED ImmatureSignatureError
+    # A token is minted on Clerk's clock and validated on this container's, so
+    # a mildly fast issuer 401s every request. PyJWT ran that check whenever
+    # `iat` was present, so the hazard predates this change — but requiring the
+    # claim routes every single token through it, which is what makes leaving
+    # it on untenable.
+    #
+    # The obvious fix — a global `leeway` — was tried and REJECTED: PyJWT
+    # applies leeway to `exp` as well, so a 60s allowance also keeps expired
+    # tokens usable for a minute (it broke `test_expired_rejected`, which is
+    # the test doing its job). Turning off only `verify_iat` is exact: expiry
+    # stays strictly enforced, and nothing is lost, because a future-dated
+    # `iat` on a signature-verified token from a trusted issuer is a clock
+    # disagreement, not an attack — `exp` is what bounds the token's life.
+    options: dict[str, Any] = {"require": required, "verify_iat": False}
     decode_kwargs: dict[str, Any] = {
         "algorithms": ["RS256"],
         "issuer": issuer,
