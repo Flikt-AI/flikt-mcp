@@ -128,7 +128,18 @@ class ClerkTokenVerifier(TokenVerifier):
             # Log the failure class only — never the token or message fragments.
             logger.info("Rejected MCP token: %s", type(e).__name__)
             return None
-        except Exception as e:  # JWKS fetch / key errors — fail closed
+        # The blind-except suppression below is deliberate and load-bearing,
+        # not a silenced warning.
+        # This is the authentication boundary. Anything that is not a clean
+        # verification must become "no, you are not authenticated" — a JWKS
+        # fetch timeout, a malformed key, a cryptography backend error, an
+        # exception type a future pyjwt invents. Narrowing the catch would let
+        # an unanticipated type propagate out of verify_token, and what a
+        # server does with an exception raised by its token verifier is a
+        # question we should never have to ask. Returning None fails CLOSED.
+        # The logged value is the class name only, never the token or the
+        # message (a JWKS error can quote request detail).
+        except Exception as e:  # noqa: BLE001 — auth boundary must fail closed
             logger.warning("MCP token verification error: %s", type(e).__name__)
             return None
 

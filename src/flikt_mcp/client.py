@@ -13,7 +13,7 @@ spend guards server-side; this client adds no privilege of its own.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -47,7 +47,7 @@ def _friendly(status_code: int, detail: str) -> str:
 
 
 class FliktClient:
-    def __init__(self, token: Optional[str] = None, base_url: Optional[str] = None):
+    def __init__(self, token: str | None = None, base_url: str | None = None):
         self._token = token or os.environ.get("FLIKT_API_TOKEN", "")
         self._base_url = (base_url or os.environ.get("FLIKT_API_BASE", DEFAULT_BASE_URL)).rstrip("/")
         if not self._token:
@@ -76,7 +76,18 @@ class FliktClient:
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", resp.text)
-            except Exception:
+            # The blind-except suppression below is deliberate. This is the
+            # error path, and its only job is to end in a FliktApiError
+            # carrying something a person can read. The two failures we can name are a non-JSON body
+            # (json.JSONDecodeError, a ValueError) and a JSON body that is not
+            # an object, so .get does not exist (AttributeError) — a 502 HTML
+            # page from a proxy hits the first, a bare JSON array the second.
+            # Narrowing to those two would be accurate today and would turn
+            # any third case into an unhandled exception surfacing mid-
+            # conversation to an agent's user, in exchange for nothing: there
+            # is no recovery here that depends on WHICH parse failed. The
+            # fallback is the raw text, which is always available.
+            except Exception:  # noqa: BLE001 — any unparseable body falls back to text
                 detail = resp.text
             if not isinstance(detail, str):
                 detail = str(detail)
@@ -97,10 +108,10 @@ class FliktClient:
         self,
         project_id: str,
         *,
-        severity: Optional[str] = None,
-        conflict_type: Optional[str] = None,
-        discipline: Optional[str] = None,
-        ball_in_court: Optional[str] = None,
+        severity: str | None = None,
+        conflict_type: str | None = None,
+        discipline: str | None = None,
+        ball_in_court: str | None = None,
         status: str = "open",
     ) -> Any:
         params = {

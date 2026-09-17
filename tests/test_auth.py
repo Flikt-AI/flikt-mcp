@@ -13,11 +13,11 @@ import pytest
 
 pytest.importorskip("jwt", reason="remote extra (pyjwt[crypto]) not installed")
 
-import jwt  # noqa: E402
-from cryptography.hazmat.primitives import serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
-from flikt_mcp import auth  # noqa: E402
+from flikt_mcp import auth
 
 ISSUER = "https://clerk.test.example"
 
@@ -45,7 +45,7 @@ def _wire(monkeypatch, keypair):
         key = public_key
 
     class _FakeJWKClient:
-        def get_signing_key_from_jwt(self, token):  # noqa: ARG002
+        def get_signing_key_from_jwt(self, token):
             return _FakeSigningKey()
 
     monkeypatch.setattr(auth, "_get_jwk_client", lambda: _FakeJWKClient())

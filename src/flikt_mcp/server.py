@@ -25,7 +25,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import Icon, ToolAnnotations
@@ -131,7 +131,7 @@ def _build_mcp() -> FastMCP:
 
 mcp = _build_mcp()
 
-_client: Optional[FliktClient] = None
+_client: FliktClient | None = None
 
 
 def _get_client() -> FliktClient:
@@ -237,9 +237,9 @@ async def get_project(project_id: str) -> str:
 )
 async def list_conflicts(
     project_id: str,
-    severity: Optional[str] = None,
-    discipline: Optional[str] = None,
-    ball_in_court: Optional[str] = None,
+    severity: str | None = None,
+    discipline: str | None = None,
+    ball_in_court: str | None = None,
     max_results: int = 25,
 ) -> str:
     """List a project's open coordination conflicts (title, severity,
@@ -317,7 +317,7 @@ async def check_review_status(project_id: str) -> str:
         openWorldHint=True,
     )
 )
-async def save_rfis_pdf(project_id: str, save_path: Optional[str] = None) -> str:
+async def save_rfis_pdf(project_id: str, save_path: str | None = None) -> str:
     """Export the project's RFI package — one ready-to-send RFI per open
     conflict — as a PDF.
 
@@ -357,7 +357,7 @@ async def save_rfis_pdf(project_id: str, save_path: Optional[str] = None) -> str
         openWorldHint=True,
     )
 )
-async def run_review(project_id: str, submission_id: Optional[str] = None) -> str:
+async def run_review(project_id: str, submission_id: str | None = None) -> str:
     """Start the review for a project's uploaded plan set. Requires a token
     with the 'start reviews' permission and an uploaded (validated)
     submission that the account's subscription fully covers — anything that
@@ -395,7 +395,7 @@ _RUN_SCOPE = "reviews:run"
 # is ever configured on the Clerk OAuth app.
 _RUN_SCOPE_GATING = os.environ.get("FLIKT_MCP_GATE_RUN_SCOPE", "").lower() in ("1", "true", "yes")
 if _REMOTE:
-    from flikt_mcp.auth import SCOPE_RUN as _RUN_SCOPE  # noqa: E402
+    from flikt_mcp.auth import SCOPE_RUN as _RUN_SCOPE
 
 
 def main() -> None:
