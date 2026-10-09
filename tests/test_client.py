@@ -291,6 +291,19 @@ class TestStreamedPdf:
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_a_non_pdf_200_is_refused_not_streamed(self):
+        """A proxy's HTML page on a 200 must not be saved as the RFI package."""
+        got = bytearray()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<html>sign in</html>", headers={"content-type": "text/html"})
+
+        c = _client_with(handler)
+        with pytest.raises(FliktApiError, match="other than a PDF"):
+            await c.stream_bulk_rfis_pdf("p1", got.extend)
+        assert got == bytearray()
+
+    @pytest.mark.asyncio
     async def test_stream_network_error_does_not_leak_host(self):
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("boom")

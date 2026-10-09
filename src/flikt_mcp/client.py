@@ -120,6 +120,14 @@ class FliktClient:
                 if resp.status_code >= 400:
                     await resp.aread()
                     self._raise_for_error(resp)
+                # ``_request`` only ever returned a body as bytes when it was a
+                # PDF; anything else (a proxy's HTML page, a JSON body) went to
+                # .json() and failed. Never stream a non-PDF into a saved file.
+                if not resp.headers.get("content-type", "").startswith("application/pdf"):
+                    raise FliktApiError(
+                        resp.status_code,
+                        "The Flikt API returned something other than a PDF for this export. Retry in a moment.",
+                    )
                 total = 0
                 async for chunk in resp.aiter_bytes():
                     write(chunk)
