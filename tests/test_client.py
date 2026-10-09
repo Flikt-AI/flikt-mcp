@@ -233,8 +233,9 @@ class TestServerTools:
         from flikt_mcp import server
 
         class FakeClient:
-            async def download_bulk_rfis_pdf(self, project_id):
-                return b"%PDF-1.4 fake"
+            async def stream_bulk_rfis_pdf(self, project_id, write):
+                write(b"%PDF-1.4 fake")
+                return len(b"%PDF-1.4 fake")
 
         monkeypatch.setattr(server, "_get_client", lambda: FakeClient())
         out = await server.save_rfis_pdf("p1", "/etc/cron.d/evil")
@@ -251,3 +252,123 @@ class TestServerTools:
         monkeypatch.setattr(server, "_get_client", lambda: FakeClient())
         out = await server.run_review("p1")
         assert "not ready to run" in out
+
+
+# ── the bulk RFI PDF is streamed, never held whole (DEBT-MCP-BULK-RFI-PDF-BUFFERED)
+
+_CHUNK = 64 * 1024
+
+
+def _pdf_handler(n_chunks: int):
+    """A PDF body of ``n_chunks`` x 64 KiB, produced lazily, as a real stream is."""
+
+    async def body():
+        for _ in range(n_chunks):
+            yield b"\0" * _CHUNK
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body(), headers={"content-type": "application/pdf"})
+
+    return handler
+
+
+class TestStreamedPdf:
+    @pytest.mark.asyncio
+    async def test_stream_hands_over_every_byte_and_returns_the_size(self):
+        got = bytearray()
+        c = _client_with(_pdf_handler(3))
+        size = await c.stream_bulk_rfis_pdf("p1", got.extend)
+        assert size == 3 * _CHUNK == len(got)
+
+    @pytest.mark.asyncio
+    async def test_stream_maps_errors_exactly_as_request_does(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Not found"})
+
+        c = _client_with(handler)
+        with pytest.raises(FliktApiError, match="list_projects") as exc:
+            await c.stream_bulk_rfis_pdf("nope", lambda _b: None)
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_a_non_pdf_200_is_refused_not_streamed(self):
+        """A proxy's HTML page on a 200 must not be saved as the RFI package."""
+        got = bytearray()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<html>sign in</html>", headers={"content-type": "text/html"})
+
+        c = _client_with(handler)
+        with pytest.raises(FliktApiError, match="other than a PDF"):
+            await c.stream_bulk_rfis_pdf("p1", got.extend)
+        assert got == bytearray()
+
+    @pytest.mark.asyncio
+    async def test_stream_network_error_does_not_leak_host(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("boom")
+
+        c = _client_with(handler)
+        with pytest.raises(FliktApiError) as exc:
+            await c.stream_bulk_rfis_pdf("p1", lambda _b: None)
+        assert "ConnectError" in str(exc.value)
+        assert "api.test" not in str(exc.value)
+        assert "boom" not in str(exc.value)
+
+
+class TestSaveRfisPdfStreaming:
+    @pytest.fixture(autouse=True)
+    def _require_mcp(self):
+        pytest.importorskip("mcp")
+
+    @pytest.mark.asyncio
+    async def test_local_save_writes_the_whole_body(self, monkeypatch, tmp_path):
+        from flikt_mcp import server
+
+        monkeypatch.setattr(server, "_REMOTE", False)
+        monkeypatch.setattr(server.Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(server, "_get_client", lambda: _client_with(_pdf_handler(5)))
+        target = tmp_path / "out" / "rfis.pdf"
+        out = await server.save_rfis_pdf("p1", str(target))
+        assert target.read_bytes() == b"\0" * (5 * _CHUNK)
+        assert out == f"Saved RFI package ({5 * _CHUNK:,} bytes) to {target.resolve()}"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_download_writes_nothing(self, monkeypatch, tmp_path):
+        """The file appears only after a COMPLETE download, as before."""
+        from flikt_mcp import server
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(402, json={"detail": "budget"})
+
+        monkeypatch.setattr(server, "_REMOTE", False)
+        monkeypatch.setattr(server.Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(server, "_get_client", lambda: _client_with(handler))
+        target = tmp_path / "out" / "rfis.pdf"
+        with pytest.raises(FliktApiError):
+            await server.save_rfis_pdf("p1", str(target))
+        assert not target.parent.exists()
+
+    @pytest.mark.asyncio
+    async def test_remote_reports_the_size_without_holding_the_body(self, monkeypatch):
+        """Memory is independent of PDF size AND of how many tenants export at
+        once: 4 concurrent 8 MiB exports peak far below ONE buffered body."""
+        import asyncio
+        import tracemalloc
+
+        from flikt_mcp import server
+
+        n_chunks = 128  # 8 MiB each
+        monkeypatch.setattr(server, "_REMOTE", True)
+        monkeypatch.setattr(server, "_get_client", lambda: _client_with(_pdf_handler(n_chunks)))
+
+        tracemalloc.start()
+        try:
+            outs = await asyncio.gather(*(server.save_rfis_pdf("p1") for _ in range(4)))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        for out in outs:
+            assert f"({n_chunks * _CHUNK:,} bytes)" in out
+        assert peak < n_chunks * _CHUNK // 4, f"peak {peak:,} B: the body is being buffered"
