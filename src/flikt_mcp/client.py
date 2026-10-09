@@ -171,6 +171,8 @@ class FliktClient:
         return await self._request("GET", f"/api/projects/{project_id}/ask", params={"q": question})
 
     async def download_bulk_rfis_pdf(self, project_id: str) -> bytes:
+        """The whole PDF in memory. Kept for library callers; the server uses
+        ``stream_bulk_rfis_pdf`` so a multi-tenant process never holds one."""
         return await self._request("GET", f"/api/projects/{project_id}/rfis.pdf")
 
     async def stream_bulk_rfis_pdf(self, project_id: str, write: Callable[[bytes], object]) -> int:

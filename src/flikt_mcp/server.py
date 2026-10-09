@@ -311,6 +311,14 @@ async def check_review_status(project_id: str) -> str:
     )
 
 
+# Above this, a local export spills from memory to a temp file.
+_PDF_SPOOL_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _discard(_chunk: bytes) -> None:
+    """Sink for a streamed body whose bytes are not needed, only its size."""
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Export RFI package (PDF)",
@@ -360,14 +368,6 @@ async def save_rfis_pdf(project_id: str, save_path: str | None = None) -> str:
         with path.open("wb") as out:
             shutil.copyfileobj(spool, out)
     return f"Saved RFI package ({size:,} bytes) to {path}"
-
-
-# Above this, a local export spills from memory to a temp file.
-_PDF_SPOOL_MAX_BYTES = 8 * 1024 * 1024
-
-
-def _discard(_chunk: bytes) -> None:
-    """Sink for a streamed body whose bytes are not needed, only its size."""
 
 
 @mcp.tool(
