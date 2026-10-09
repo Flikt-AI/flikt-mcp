@@ -13,6 +13,7 @@ spend guards server-side; this client adds no privilege of its own.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -65,14 +66,26 @@ class FliktClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    @staticmethod
+    def _unreachable(e: httpx.HTTPError) -> FliktApiError:
+        # Don't echo the base URL (it can be an internal host) or raw error.
+        return FliktApiError(
+            0, f"Could not reach the Flikt API ({type(e).__name__}). Check your connection and retry."
+        )
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
             resp = await self._client.request(method, path, **kwargs)
         except httpx.HTTPError as e:
-            # Don't echo the base URL (it can be an internal host) or raw error.
-            raise FliktApiError(
-                0, f"Could not reach the Flikt API ({type(e).__name__}). Check your connection and retry."
-            ) from e
+            raise self._unreachable(e) from e
+        self._raise_for_error(resp)
+        if resp.headers.get("content-type", "").startswith("application/pdf"):
+            return resp.content
+        return resp.json()
+
+    @staticmethod
+    def _raise_for_error(resp: httpx.Response) -> None:
+        """Map a 4xx/5xx to ``FliktApiError``. The body must already be read."""
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", resp.text)
@@ -92,9 +105,28 @@ class FliktClient:
             if not isinstance(detail, str):
                 detail = str(detail)
             raise FliktApiError(resp.status_code, _friendly(resp.status_code, detail))
-        if resp.headers.get("content-type", "").startswith("application/pdf"):
-            return resp.content
-        return resp.json()
+
+    async def _stream_to(self, path: str, write: Callable[[bytes], object]) -> int:
+        """GET ``path`` and hand the body to ``write`` chunk by chunk.
+
+        Returns the byte count. Peak memory is one chunk, not the body: in
+        remote mode every tenant's export is in flight at once, so a buffered
+        body stacks per tenant (DEBT-MCP-BULK-RFI-PDF-BUFFERED). Errors map
+        exactly as ``_request`` maps them; an error body is small, so it is read
+        whole before mapping.
+        """
+        try:
+            async with self._client.stream("GET", path) as resp:
+                if resp.status_code >= 400:
+                    await resp.aread()
+                    self._raise_for_error(resp)
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    write(chunk)
+                    total += len(chunk)
+                return total
+        except httpx.HTTPError as e:
+            raise self._unreachable(e) from e
 
     # ── Read surface (scopes: projects:read / conflicts:read / ask / rfi:read)
 
@@ -132,6 +164,10 @@ class FliktClient:
 
     async def download_bulk_rfis_pdf(self, project_id: str) -> bytes:
         return await self._request("GET", f"/api/projects/{project_id}/rfis.pdf")
+
+    async def stream_bulk_rfis_pdf(self, project_id: str, write: Callable[[bytes], object]) -> int:
+        """The bulk RFI PDF, streamed into ``write``; returns its size in bytes."""
+        return await self._stream_to(f"/api/projects/{project_id}/rfis.pdf", write)
 
     # ── Run rail (scope: reviews:run) ──────────────────────────────────
 

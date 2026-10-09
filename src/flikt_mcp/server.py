@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -325,27 +327,47 @@ async def save_rfis_pdf(project_id: str, save_path: str | None = None) -> str:
     machine. Over the hosted Flikt connector, tools can't write to your
     computer, so this confirms the package is ready and points you to the Flikt
     portal to download it."""
-    async with _client_for_request() as client:
-        pdf = await client.download_bulk_rfis_pdf(project_id)
+    # Streamed, never held whole (DEBT-MCP-BULK-RFI-PDF-BUFFERED). Remote mode
+    # only reports the size, so it counts and discards: every tenant's export
+    # can be in flight at once in this one process. Local mode spools to a
+    # size-capped temp file and writes save_path only after the download has
+    # completed, exactly as the buffered version did.
     if _REMOTE:
+        async with _client_for_request() as client:
+            size = await client.stream_bulk_rfis_pdf(project_id, _discard)
         return (
-            f"Your RFI package is ready ({len(pdf):,} bytes). The hosted Flikt "
+            f"Your RFI package is ready ({size:,} bytes). The hosted Flikt "
             "connector can't save files to your computer — open this project in "
             "the Flikt portal and use Export RFIs to download the PDF. You can "
             "keep asking me about the project's conflicts here in the meantime."
         )
-    if not save_path:
-        return "To save the RFI package, call this again with a save_path, e.g. ~/Downloads/flikt-rfis.pdf"
-    # Contain the write to the user's home tree — a save_path coming from model
-    # output (possibly influenced by returned conflict text) must not escape to
-    # arbitrary filesystem locations.
-    path = Path(save_path).expanduser().resolve()
-    home = Path.home().resolve()
-    if path != home and home not in path.parents:
-        return f"Refusing to write outside your home directory ({home}). Pick a save_path under it."
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(pdf)
-    return f"Saved RFI package ({len(pdf):,} bytes) to {path}"
+    with tempfile.SpooledTemporaryFile(max_size=_PDF_SPOOL_MAX_BYTES) as spool:
+        async with _client_for_request() as client:
+            size = await client.stream_bulk_rfis_pdf(project_id, spool.write)
+        if not save_path:
+            return (
+                "To save the RFI package, call this again with a save_path, e.g. ~/Downloads/flikt-rfis.pdf"
+            )
+        # Contain the write to the user's home tree — a save_path coming from model
+        # output (possibly influenced by returned conflict text) must not escape to
+        # arbitrary filesystem locations.
+        path = Path(save_path).expanduser().resolve()
+        home = Path.home().resolve()
+        if path != home and home not in path.parents:
+            return f"Refusing to write outside your home directory ({home}). Pick a save_path under it."
+        path.parent.mkdir(parents=True, exist_ok=True)
+        spool.seek(0)
+        with path.open("wb") as out:
+            shutil.copyfileobj(spool, out)
+    return f"Saved RFI package ({size:,} bytes) to {path}"
+
+
+# Above this, a local export spills from memory to a temp file.
+_PDF_SPOOL_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _discard(_chunk: bytes) -> None:
+    """Sink for a streamed body whose bytes are not needed, only its size."""
 
 
 @mcp.tool(
